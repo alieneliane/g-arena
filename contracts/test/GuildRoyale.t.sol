@@ -5,6 +5,7 @@ import "forge-std/Test.sol";
 import "../src/ClanManager.sol";
 import "../src/RoyaleEngine.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
  * @title MockGoodDollar
@@ -29,7 +30,7 @@ contract MockGoodDollar is ERC20 {
 
 /**
  * @title GuildRoyaleTest
- * @dev Comprehensive Foundry test suite covering ClanManager and RoyaleEngine core logic.
+ * @dev Comprehensive Foundry test suite covering ClanManager and RoyaleEngine proxy architectures.
  */
 contract GuildRoyaleTest is Test {
     MockGoodDollar public gDollar;
@@ -49,16 +50,32 @@ contract GuildRoyaleTest is Test {
     uint256 public constant STAKE_AMOUNT = 10 * 10**18; // 10 G$
 
     function setUp() public {
-        // 1. Deploy Mock G$ Token
         vm.startPrank(owner);
         gDollar = new MockGoodDollar();
 
-        // 2. Deploy Implementations and Initialize Proxies (Direct deployment configuration for unit testing)
-        clanManager = new ClanManager();
-        clanManager.initialize(address(gDollar), platformTreasury, CREATION_FEE, STAKE_AMOUNT);
+        // 1. Deploy ClanManager via ERC1967Proxy (UUPS Architecture)
+        ClanManager clanManagerImpl = new ClanManager();
+        bytes memory clanManagerInitData = abi.encodeWithSelector(
+            ClanManager.initialize.selector,
+            address(gDollar),
+            platformTreasury,
+            CREATION_FEE,
+            STAKE_AMOUNT
+        );
+        ERC1967Proxy clanManagerProxy = new ERC1967Proxy(address(clanManagerImpl), clanManagerInitData);
+        clanManager = ClanManager(address(clanManagerProxy));
 
-        royaleEngine = new RoyaleEngine();
-        royaleEngine.initialize(address(gDollar), address(clanManager), backendOperator);
+        // 2. Deploy RoyaleEngine via ERC1967Proxy (UUPS Architecture)
+        RoyaleEngine royaleEngineImpl = new RoyaleEngine();
+        bytes memory royaleEngineInitData = abi.encodeWithSelector(
+            RoyaleEngine.initialize.selector,
+            address(gDollar),
+            address(clanManager),
+            backendOperator
+        );
+        ERC1967Proxy royaleEngineProxy = new ERC1967Proxy(address(royaleEngineImpl), royaleEngineInitData);
+        royaleEngine = RoyaleEngine(address(royaleEngineProxy));
+        
         vm.stopPrank();
 
         // 3. Fund Test Users with G$ tokens
@@ -70,24 +87,19 @@ contract GuildRoyaleTest is Test {
     // --- ClanManager Unit Tests ---
 
     /**
-     * @notice Verifies successful clan creation via valid ERC-677 transferAndCall.
+     * @notice Verifies successful clan creation via valid ERC-677 transferAndCall through the Proxy.
      */
     function test_Success_CreateClan() public {
         vm.startPrank(alice);
         
-        // Encode payload data: string clanName
         bytes memory payload = abi.encode("Alpha Clan");
-        // Encode final ERC-677 call: actionType 0 (Create), payload data
         bytes memory data = abi.encode(uint8(0), payload);
 
-        // Track financial balances before execution
         uint256 treasuryBalanceBefore = gDollar.balanceOf(platformTreasury);
         uint256 aliceBalanceBefore = gDollar.balanceOf(alice);
 
-        // Execute transferAndCall directly on the token contract
         gDollar.transferAndCall(address(clanManager), CREATION_FEE, data);
 
-        // Assert contract states
         (uint256 id, string memory name, address leader, uint256 hp, uint256 totalMembers, bool isActive) = clanManager.clans(1);
         assertEq(id, 1);
         assertEq(name, "Alpha Clan");
@@ -96,7 +108,6 @@ contract GuildRoyaleTest is Test {
         assertEq(totalMembers, 1);
         assertTrue(isActive);
 
-        // Assert financial settlement correctness
         assertEq(gDollar.balanceOf(platformTreasury), treasuryBalanceBefore + CREATION_FEE);
         assertEq(gDollar.balanceOf(alice), aliceBalanceBefore - CREATION_FEE);
         vm.stopPrank();
@@ -110,7 +121,6 @@ contract GuildRoyaleTest is Test {
         bytes memory payload = abi.encode("Beta Clan");
         bytes memory data = abi.encode(uint8(0), payload);
 
-        // Expect custom error from ClanManager due to sending lower fee
         vm.expectRevert(ClanManager.InsufficientAmount.selector);
         gDollar.transferAndCall(address(clanManager), CREATION_FEE - 1, data);
         vm.stopPrank();
@@ -120,25 +130,20 @@ contract GuildRoyaleTest is Test {
      * @notice Verifies a user can successfully stake tokens and join an active clan.
      */
     function test_Success_JoinClan() public {
-        // Establish a clan first via Alice
         vm.prank(alice);
         gDollar.transferAndCall(address(clanManager), CREATION_FEE, abi.encode(uint8(0), abi.encode("Alpha Clan")));
 
-        // Bob joins the existing clan (ID: 1)
         vm.startPrank(bob);
-        bytes memory payload = abi.encode(uint256(1)); // Target Clan ID
-        bytes memory data = abi.encode(uint8(1), payload); // Action Type 1 = Join Clan
+        bytes memory payload = abi.encode(uint256(1)); 
+        bytes memory data = abi.encode(uint8(1), payload); 
 
         uint256 contractEscrowBefore = gDollar.balanceOf(address(clanManager));
 
         gDollar.transferAndCall(address(clanManager), STAKE_AMOUNT, data);
 
-        // Assert member mappings updated correctly
         (, uint256 clanId, , uint256 stakedAmount) = clanManager.players(bob);
         assertEq(clanId, 1);
         assertEq(stakedAmount, STAKE_AMOUNT);
-
-        // Assert escrow safety balance increased inside contract execution
         assertEq(gDollar.balanceOf(address(clanManager)), contractEscrowBefore + STAKE_AMOUNT);
         vm.stopPrank();
     }
@@ -148,7 +153,6 @@ contract GuildRoyaleTest is Test {
      */
     function test_Revert_DirectCallback_Unauthorized() public {
         vm.startPrank(alice);
-        // Direct calls not stemming from the official GoodDollar token address must revert securely
         vm.expectRevert(ClanManager.Unauthorized.selector);
         clanManager.onTokenTransfer(alice, STAKE_AMOUNT, abi.encode(uint8(1), abi.encode(uint256(1))));
         vm.stopPrank();
@@ -165,7 +169,7 @@ contract GuildRoyaleTest is Test {
         bool[] memory statuses = new bool[](1);
         statuses[0] = true;
 
-        vm.prank(alice); // Unauthorized malicious hot-wallet actor
+        vm.prank(alice); 
         vm.expectRevert(RoyaleEngine.Unauthorized.selector);
         royaleEngine.processDailyResolutions(users, statuses);
     }
