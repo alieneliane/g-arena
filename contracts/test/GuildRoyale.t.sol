@@ -111,7 +111,7 @@ contract GuildRoyaleTest is Test {
         bytes memory data = abi.encode(uint8(0), payload);
 
         // Expect custom error from ClanManager due to sending lower fee
-        vm.expectRevert(ClanManager.InsufficientAmount.creator);
+        vm.expectRevert(ClanManager.InsufficientAmount.selector);
         gDollar.transferAndCall(address(clanManager), CREATION_FEE - 1, data);
         vm.stopPrank();
     }
@@ -149,7 +149,7 @@ contract GuildRoyaleTest is Test {
     function test_Revert_DirectCallback_Unauthorized() public {
         vm.startPrank(alice);
         // Direct calls not stemming from the official GoodDollar token address must revert securely
-        vm.expectRevert(ClanManager.Unauthorized.creator);
+        vm.expectRevert(ClanManager.Unauthorized.selector);
         clanManager.onTokenTransfer(alice, STAKE_AMOUNT, abi.encode(uint8(1), abi.encode(uint256(1))));
         vm.stopPrank();
     }
@@ -166,7 +166,7 @@ contract GuildRoyaleTest is Test {
         statuses[0] = true;
 
         vm.prank(alice); // Unauthorized malicious hot-wallet actor
-        vm.expectRevert(RoyaleEngine.Unauthorized.creator);
+        vm.expectRevert(RoyaleEngine.Unauthorized.selector);
         royaleEngine.processDailyResolutions(users, statuses);
     }
 }
